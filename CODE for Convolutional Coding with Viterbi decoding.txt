@@ -1,0 +1,173 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------- Convolutional Encoder -------------------
+def convolutional_encode(data_bits, g_matrix, constraint_len, tail_zero=True):
+    n_output = len(g_matrix)
+    memory = [0] * (constraint_len - 1)
+    encoded = []
+
+    if tail_zero:
+        data_bits = list(data_bits) + [0] * (constraint_len - 1)
+
+    for bit in data_bits:
+        reg = [bit] + memory
+        for g in g_matrix:
+            out = sum([reg[i] * g[i] for i in range(constraint_len)]) % 2
+            encoded.append(out)
+        memory = reg[:-1]
+    return np.array(encoded)
+
+# ------------------- Hard Decision Viterbi Decoder -------------------
+def hard_viterbi_decode(encoded, g_matrix, constraint_len):
+    n_output = len(g_matrix)
+    n_states = 2 ** (constraint_len - 1)
+    path_metrics = [float('inf')] * n_states
+    path_metrics[0] = 0
+    paths = [[] for _ in range(n_states)]
+
+    def get_output(state, input_bit):
+        reg = [input_bit] + [int(x) for x in format(state, f'0{constraint_len-1}b')]
+        output = []
+        for g in g_matrix:
+            output.append(sum([reg[i] * g[i] for i in range(constraint_len)]) % 2)
+        return output
+
+    for i in range(0, len(encoded), n_output):
+        new_metrics = [float('inf')] * n_states
+        new_paths = [[] for _ in range(n_states)]
+        received = encoded[i:i+n_output]
+
+        for state in range(n_states):
+            if path_metrics[state] < float('inf'):
+                for bit in [0, 1]:
+                    next_state = ((bit << (constraint_len - 2)) | (state >> 1)) & (n_states - 1)
+                    expected = get_output(state, bit)
+                    dist = sum([received[j] != expected[j] for j in range(n_output)])
+                    metric = path_metrics[state] + dist
+                    if metric < new_metrics[next_state]:
+                        new_metrics[next_state] = metric
+                        new_paths[next_state] = paths[state] + [bit]
+
+        path_metrics = new_metrics
+        paths = new_paths
+
+    best_state = np.argmin(path_metrics)
+    return np.array(paths[best_state])
+
+# ------------------- Soft Decision Viterbi Decoder -------------------
+def soft_viterbi_decode(received, g_matrix, constraint_len):
+    n_output = len(g_matrix)
+    n_states = 2 ** (constraint_len - 1)
+    path_metrics = [float('inf')] * n_states
+    path_metrics[0] = 0.0
+    paths = [[] for _ in range(n_states)]
+
+    def get_output(state, input_bit):
+        reg = [input_bit] + [int(x) for x in format(state, f'0{constraint_len-1}b')]
+        output = []
+        for g in g_matrix:
+            output.append(sum([reg[i] * g[i] for i in range(constraint_len)]) % 2)
+        return output
+
+    for i in range(0, len(received), n_output):
+        new_metrics = [float('inf')] * n_states
+        new_paths = [[] for _ in range(n_states)]
+
+        for state in range(n_states):
+            if path_metrics[state] < float('inf'):
+                for input_bit in [0, 1]:
+                    next_state = ((input_bit << (constraint_len - 2)) | (state >> 1)) & (n_states - 1)
+                    expected = get_output(state, input_bit)
+                    metric = sum([(received[i+j] - (1 - 2 * expected[j]))**2 for j in range(n_output)])
+                    total_metric = path_metrics[state] + metric
+                    if total_metric < new_metrics[next_state]:
+                        new_metrics[next_state] = total_metric
+                        new_paths[next_state] = paths[state] + [input_bit]
+
+        path_metrics = new_metrics
+        paths = new_paths
+
+    best_state = np.argmin(path_metrics)
+    return np.array(paths[best_state])
+
+# ------------------- BER vs Eb/N0 Simulation -------------------
+def simulate_ber_vs_ebn0(data_len=1000, g_matrix=[[1,0,1],[1,1,1]], constraint_len=3,
+                          ebn0_range=np.arange(0, 8, 1), tail_zero=True):
+    ber_hard = []
+    ber_soft = []
+
+    for ebn0_db in ebn0_range:
+        data = np.random.randint(0, 2, data_len)
+        encoded = convolutional_encode(data, g_matrix, constraint_len, tail_zero)
+        
+        # BPSK Modulation: 0->+1, 1->-1
+        bpsk = 1 - 2 * encoded
+
+        # Add AWGN
+        ebn0 = 10**(ebn0_db / 10)
+        rate = len(data) / len(encoded)
+        noise_std = np.sqrt(1 / (2 * rate * ebn0))
+        noise = noise_std * np.random.randn(len(bpsk))
+        received = bpsk + noise
+
+        # Hard decision
+        received_hard = (received < 0).astype(int)
+        decoded_hard = hard_viterbi_decode(received_hard, g_matrix, constraint_len)[:len(data)]
+        ber_h = np.mean(decoded_hard != data)
+        ber_hard.append(ber_h)
+
+        # Soft decision
+        decoded_soft = soft_viterbi_decode(received, g_matrix, constraint_len)[:len(data)]
+        ber_s = np.mean(decoded_soft != data)
+        ber_soft.append(ber_s)
+
+        print(f"Eb/N0={ebn0_db} dB | BER(Hard): {ber_h:.5f}, BER(Soft): {ber_s:.5f}")
+
+    # Plotting
+    plt.figure(figsize=(8,5))
+    plt.semilogy(ebn0_range, ber_hard, 'o-', label='Hard Viterbi')
+    plt.semilogy(ebn0_range, ber_soft, 's-', label='Soft Viterbi')
+    plt.xlabel('Eb/N0 (dB)')
+    plt.ylabel('Bit Error Rate (BER)')
+    plt.title('BER vs Eb/N0 for Hard and Soft Viterbi')
+    plt.grid(True, which='both')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+# ------------------- Full Test Run for Basic Output -------------------
+def full_test_run():
+    g_matrix = [[1,0,1], [1,1,1]]
+    constraint_len = 3
+    data = np.random.randint(0, 2, 6)
+    print("Original Data:        ", data)
+
+    encoded = convolutional_encode(data, g_matrix, constraint_len)
+    print("Encoded Bits:         ", encoded)
+
+    # Add errors manually (for hard decoder)
+    encoded_noisy_hard = encoded.copy()
+    encoded_noisy_hard[2] ^= 1
+    encoded_noisy_hard[3] ^= 1
+    print("Noisy Encoded (Hard): ", encoded_noisy_hard)
+
+    # Hard decode
+    decoded_hard = hard_viterbi_decode(encoded_noisy_hard, g_matrix, constraint_len)[:len(data)]
+    print("Hard Decoded Data:    ", decoded_hard)
+    print("Bit Errors (Hard):    ", np.sum(data != decoded_hard))
+
+    # Soft channel
+    bpsk = 1 - 2 * encoded
+    noise = 0.5 * np.random.randn(len(bpsk))
+    received_soft = bpsk + noise
+    print("Noisy Encoded (Soft): ", np.round(received_soft, 2))  # NEW PRINT STATEMENT
+
+    # Soft decode
+    decoded_soft = soft_viterbi_decode(received_soft, g_matrix, constraint_len)[:len(data)]
+    print("Soft Decoded Data:    ", decoded_soft)
+    print("Bit Errors (Soft):    ", np.sum(data != decoded_soft))
+
+# ------------------- Run All -------------------
+full_test_run()
+simulate_ber_vs_ebn0()
